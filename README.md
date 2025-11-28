@@ -1,253 +1,129 @@
-# Bad BPF
-A collection of malicious eBPF programs that make use of eBPF's ability to
-read and write user data in between the usermode program and the kernel.
+# synthetic-file-tracker-system
 
-- [Overview](#Overview)
-- [To Build](#Build)
-- [To Run](#Run)
-- [Availible Programs](#Programs)
+SPDX-License-Identifier: (LGPL-2.1 OR BSD-2-Clause)
 
+A userspace + eBPF system that provides a synthetic in-memory file store and a small interactive loader/monitor (`trace_fs`) to exercise and observe synthetic file activity via BPF tracepoints and maps.
 
-# Overview
-See my [blog](https://blog.tofile.dev/2021/08/01/bad-bpf.html) and my [DEF CON talk](https://defcon.org/html/defcon-29/dc-29-speakers.html#path) for an overview on how thee programs work and why this is interesting.
+* [Overview](#overview)
+* [To Build](#build)
+* [To Run](#run)
+* [Program: trace_fs](#program-trace_fs)
 
-Examples have been tested on:
-- Ubuntu 22.04
+---
 
-# Build
-To use pre-build binaries, grab them from the [Releases](https://github.com/pathtofile/bad-bpf/releases) page.
+## Overview
 
-To build from source, do the following:
+`trace_fs` demonstrates how eBPF maps and tracepoints can be used to present synthetic file contents to userland readers. The userspace loader loads the BPF skeleton, attaches tracepoint handlers for filesystem syscalls, and provides an interactive console to create, update, and inspect synthetic file entries stored in a pinned BPF map.
 
-## Dependecies
-To build and run all the examples, you will need a Linux kernel version of at least [4.7](https://github.com/iovisor/bcc/blob/master/docs/kernel-versions.md).
+Examples were developed and tested on modern Ubuntu releases; this project uses libbpf and clang/LLVM for BPF compilation.
 
-As this code makes use of CO-RE, it requires a recent version of Linux that has BTF Type information.
-See [these notes in the libbpf README](https://github.com/libbpf/libbpf/tree/master#bpf-co-re-compile-once--run-everywhere)
-for more information. For example Ubuntu requries `Ubuntu 20.10`+.
+---
 
-To build it requires these dependecies:
-- zlib
-- libelf
-- libbfd
-- clang and llvm **14**
-- make
+## To Build
 
-On Ubuntu these can be installed by
+### Dependencies
+
+You need a recent Linux kernel (BTF/CO-RE support) and the following packages:
+
+* clang and llvm (recommended recent versions)
+* zlib / libelf / libbfd
+* build-essential / make
+
+On Debian/Ubuntu-like systems:
+
 ```bash
-sudo apt install build-essential clang-14 llvm-14 libelf1 libelf-dev zlib1g-dev libbfd-dev libcap-dev linux-tools-common linux-tools-generic
+sudo apt install build-essential clang llvm libelf1 libelf-dev zlib1g-dev libbfd-dev libcap-dev linux-tools-common linux-tools-generic
 ```
 
-## Build
-To Build from source, recusivly clone the respository the run `make` in the `src` directory to build:
+### Build steps
+
+The repository contains `libbpf` and `bpftool` subtrees used for building local artifacts.
+
+From the project root:
+
 ```bash
-# --recursive is needed to also get the libbpf source
-git clone --recursive https://github.com/pathtofile/bad-bpf.git
-cd bad-bpf/src
+cd src
 make
 ```
-The binaries will built into `bad-bpf/src/`. If you encounter issues with related to `vmlinux.h`,
-try remaking the file for your specific kernel and distribution:
+
+Notes:
+
+* The Makefile builds `trace_fs` and its BPF objects via clang + bpftool.
+* If `vmlinux.h` for your architecture is missing, create it with `bpftool`:
+
 ```bash
-cd bad-bpf/tools
+cd tools
 ./bpftool btf dump file /sys/kernel/btf/vmlinux format c > ../vmlinux/<arch>/vmlinux.h
 ```
 
-# Run
-To run, launch each program as `root`. Every program has a `--help` option
-that has required arguemnts and examples.
+Built binaries and intermediate artifacts are placed under `.output/` and the `src/` directory (the `trace_fs` loader binary appears in `src/`).
 
-# Programs
-## Common Arguments
-As well as `--help`, every program also has a `--target-ppid`/`-t`.
-This option restricts the programs' operation to only programs that are children
-of the process matching this PID. This demonstrates to how affect some programs, but not others.
+---
 
+## To Run
 
-- [Bad BPF](#bad-bpf)
-- [Overview](#overview)
-- [Build](#build)
-  - [Dependecies](#dependecies)
-  - [Build](#build-1)
-- [Run](#run)
-- [Programs](#programs)
-  - [Common Arguments](#common-arguments)
-  - [BPF-Dos](#bpf-dos)
-  - [Exec-Hijack](#exec-hijack)
-  - [Pid-Hide](#pid-hide)
-  - [Sudo-Add](#sudo-add)
-  - [Write-Blocker](#write-blocker)
-  - [Text-Replace](#text-replace)
-  - [Text-Replace2](#text-replace2)
-    - [Altering Configuration](#altering-configuration)
-    - [Running Detached](#running-detached)
+`trace_fs` requires root to attach eBPF programs and pin maps. Basic flow:
 
-## BPF-Dos
+1. (Optional) Ensure BPF filesystem is available for pinning:
+
 ```bash
-sudo ./bpfdos
+sudo mount -t bpf bpffs /sys/fs/bpf || true
 ```
-This program raises a `SIG_KILL` signal to any program attempting to use the `ptrace` syscall, e.g. `strace`.
-Once bpf-dos starts you can test it by running:
+
+2. From `src/` run the loader:
+
 ```bash
-strace /bin/whoami
+sudo ./trace_fs
 ```
 
+3. The loader is interactive. Supported commands:
 
-## Exec-Hijack
-```bash
-sudo ./exechijack
-```
-This program intercepts all `execve` calls (used to create new processes) and instead makes then call
-`/a`. To run, first ensure there is a program in the root dir `/a` (probably best to make is executable by all).
-`bad-bpf` builds a simple program `hijackee` that simply prints out the `uid` and `argv[0]`, so you can use that:
-```bash
-make
-sudo cp ./hijackee /a
-sudo chmod ugo+rx /a
-```
+* `t` — print the current synthetic tree (user-space bookkeeping)
+* `o <path>` — open a path (adds an fd mapping and, if enabled, initializes a synthetic entry)
+* `c <fd>` — close fd and remove mappings
+* `w <fd>` — write synthetic content for the fd (enter content; terminate with a single line containing `.`)
+* `r <fd>` — perform a read on the real fd (BPF handler will attempt to overwrite returned data with synthetic content)
+* `q` — quit
 
-Then just run `sudo ./exechijack`.
+On exit the loader prompts whether to pin the synthetic map under `/sys/fs/bpf/trace_fs/synthetic_fs` for reuse by future runs.
 
+---
 
-## Pid-Hide
-```
-sudo ./pidhide --pid-to-hide 2222
-```
-This program hides the process matching this pid from tools such as `ps`.
+## Program: trace_fs
 
-It works by hooking the `getdents64` syscall, as `ps` works by looking for every sub-folder
-of `/proc/`. PidHide unlinks the folder matching the PID, so `ps` only sees the folders before
-and after it.
+`trace_fs` is the single application in this repository. Key behaviors:
 
+* BPF side (tracepoint handlers):
 
-## Sudo-Add
-```
-sudo ./sudoadd --username lowpriv-user
-```
-This program allows a normally low-privledged user to use `sudo` to become root.
+  * Hooks `sys_enter_openat`, `sys_enter_close`, `sys_enter_read`, `sys_enter_pread64` and their exits.
+  * Emits small `fs_event` records into a ring buffer for opens/closes.
+  * Maintains a pinned hash map `synthetic_fs` keyed by filename (`char[256]`) with values containing up to 4096 bytes of synthetic content.
+  * Tracks in-flight reads (`read_buffers`) to know the user buffer pointer and file descriptor on syscall exit, then writes synthetic content into user buffers in 128-byte chunks using `bpf_probe_write_user` when a synthetic entry exists for the opened path.
+  * Uses a BPF map `fd_to_path` (updated by userspace) to map fds → filename so the BPF program can identify which synthetic content to present during reads.
 
-It works by intercepting `sudo`'s reading of the `/etc/sudoers` file, and overwriting the first line
-with `<username> ALL=(ALL:ALL) NOPASSWD:ALL #`. This tricks sudo into thinking the user is allowed to become
-root. Other programs such as `cat` or `sudoedit` are unnafected, so to those programs the file is unchanged
-and the user does not have those privliges. The `#` at the end of the line ensures the rest of the line
-is trated as a comment, so it doesn't currup the file's logic.
+* Userspace loader (`trace_fs`):
 
+  * Loads the BPF skeleton and attaches programs.
+  * Creates a ring buffer consumer to print open/close events emitted by the BPF program.
+  * Maintains in-memory bookkeeping of synthetic entries and an fd→path table; it updates the `fd_to_path` BPF map when files are opened/closed.
+  * Provides interactive commands to create/update synthetic file content (which is written into the `synthetic_fs` map).
+  * Optionally pins the `synthetic_fs` map for reuse across runs (pins to `/sys/fs/bpf/trace_fs/synthetic_fs`).
 
-## Write-Blocker
-```
-sudo ./writeblocker --pid 508
-```
-This program intercepts all write syscall for a given process PID.
-Instead of passing the data to the actual write syscall, writeblocker will instead
-fake the call, returning the same number of bytes that the userspaceprogram expects
-to be written.
+### Internals / Data layout
 
-Only File Descriptors > 2 will be blocked, so stdin, stdout, and stderror still work.
+* `synthetic_fs` map: key `char[256]`, value `struct fake_file_block { char data[4096]; }`.
+* `read_buffers` map: key `pid_tgid` (u64), value `{ buf_ptr, fd }`.
+* `fd_to_path` map: key `int` (fd), value `char[256]`.
 
-For example, if you block the writes for the `rsyslogd` process, ssh logins will
-not be written to `/var/log/auth.log`.
+The loader populates `fd_to_path` so the BPF program can locate the synthetic content for a given fd during read exits.
 
+---
 
-## Text-Replace
-```
-sudo ./textreplace --filename /path/to/file --input foo --replace bar
-```
-This program replaces all text matching `input` in the file with the `replace` text.
-This has a number of uses, for example:
+## Security and Notes
 
-To hide kernel module `joydev` from tools such as `lsmod`:
-```bash
-./textreplace -f /proc/modules -i 'joydev' -r 'cryptd'
-```
+* Building and running `trace_fs` requires root privileges and knowledge of eBPF workflows. Use on systems you control.
+* `trace_fs` demonstrates techniques for presenting synthetic data to userland readers; exercise caution and do not deploy in production without a clear, legitimate purpose and appropriate safeguards.
+* The project uses libbpf and bpftool from the repository subtree to ensure consistent builds.
 
-Spoof the MAC address of the `eth0` interface:
-```bash
-/textreplace -f /sys/class/net/eth0/address -i '00:15:5d:01:ca:05' -r '00:00:00:00:00:00'
-```
-Malware conducting anti-sandbox checks might check the MAC address to look for signs it is
-running inside a Virtual Machine or Sandbox, and not on a 'real' machine.
+---
 
-
-**NOTE:** Both `input` and `replace` must be the same length, to avoid adding NULL characters to the
-middle of a block of text. To enter a newline from a bash prompt, use `$'\n'`, e.g. `--replace $'text\n'`.
-
-
-## Text-Replace2
-This program works the same as `Text-Replace`, however it has two extra features:
-- The program's configuration is alterable at runtime using eBPF Maps.
-- The userspace loader can detach and exit
-
-### Altering Configuration
-The filename is stored in the eBPF Map `map_filename`. The Key is always `0`, and the value matches this struct:
-```c
-struct tr_file {
-    char filename[50];
-    unsigned int filename_len;
-};
-```
-That is, 50 ascii characters, then an unsigned int mathcing the length of the actual filename string.
-
-The easiest way to view and alter eBPF maps is using `bpftool`:
-```bash
-# List current config
-$> bpftool map dump name map_filename
-[{
-        "key": 0,
-        "value": {
-            "filename": "/proc/modules",
-            "filename_len": 13
-        }
-    }
-]
-
-# Alter filename to be 'AAAA'
-$> bpftool map update name map_filename \
-    key hex 00 00 00 00 \
-    value hex 61 61 61 61 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 04 00 00 00
-
-# Confirm change config
-$> bpftool map dump name map_filename
-[{
-        "key": 0,
-        "value": {
-            "filename": "aaaa",
-            "filename_len": 4
-        }
-    }
-]
-```
-
-To alter the text to find and replace, alter the items in the Map `map_text`. The text to find is at key `0`, and the text to replace is key `1`.
-The values will each match this struct:
-```c
-struct tr_text {
-    char text[20];
-    unsigned int text_len;
-};
-```
-
-
-### Running Detached
-By running the program with `--detach`, the userspace loader can exit without stopping the eBPF Programs.
-Before running, first make sure the bpf filesystem is mounted:
-```bash
-sudo mount bpffs -t bpf /sys/fs/bpf
-```
-
-Then you can run text-replace2 detached:
-```bash
-./textreplace2 -f /proc/modules -i 'joydev' -r 'cryptd' --detach
-```
-
-This will create a number of eBPF Link files under `/sys/fs/bpf/textreplace`.
-Once loader has sucessfully run, you can check the logs by running:
-```bash
-sudo cat /sys/kernel/debug/tracing/trace_pipe
-# confirm link files are there
-sudo ls -l /sys/fs/bpf/textreplace
-```
-
-Then to stop, simply delete the link files:
-```bash
-sudo rm -r /sys/fs/bpf/textreplace
-```
